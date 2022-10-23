@@ -59,7 +59,7 @@ class Corner:
         return self.quality > other.quality
 
 
-def _track_corners(image_0, image_1, corners_data, levels, quality_level=0.04):
+def _track_corners(image_0, image_1, corners_data, levels, quality_level=0.03):
     if len(corners_data) > 0:
         corner_coords = np.array(list(map(lambda corner: corner.position, corners_data))).reshape(-1, 2)
         min_threshold = float(
@@ -90,7 +90,7 @@ def _track_corners(image_0, image_1, corners_data, levels, quality_level=0.04):
     return deepcopy(corners_data)
 
 
-def _find_corners(image_1, max_id, min_distance, mask, level=0, max_corners=500, quality_level=0.04):
+def _find_corners(image_1, max_id, min_distance, mask, level=0, max_corners=500, quality_level=0.03):
     new_corner_coords, new_corner_qualities = cv2.goodFeaturesToTrackWithQuality(
         image_1, max_corners, quality_level, min_distance, np.uint8(mask))
     new_corners_data = []
@@ -107,12 +107,12 @@ def _find_corners(image_1, max_id, min_distance, mask, level=0, max_corners=500,
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    pyr_levels = 3
+    pyr_levels = 4
     corners_data = []
     image_0 = np.array([[]])
     max_id = 0
     circle_size = max(int(frame_sequence[0].shape[0] / 70), 5)
-    for frame, image in tqdm(enumerate(frame_sequence[1:], 1)):
+    for frame, image in tqdm(enumerate(frame_sequence)):
         image_1 = deepcopy(image)
         corners_data = _track_corners(image_0, image_1, corners_data, pyr_levels)
         mask = np.ones_like(image).astype(np.uint8)
