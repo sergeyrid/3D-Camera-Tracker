@@ -65,17 +65,8 @@ def triangulate(frame1, view_mats, corner_storage, intrinsic_mat, triangulate_pa
                                                      intrinsic_mat,
                                                      triangulate_params)
     new_points3d_with_ids = list(filter(lambda p: p[0] not in old_ids, zip(list(ids), list(points3d))))
-    if len(new_points3d_with_ids) == 0:
-        new_ids = np.array([])
-        new_points3d = np.array([]).reshape(0, 3)
-    else:
-        new_ids, new_points3d = zip(*new_points3d_with_ids)
-        new_ids = np.array(list(new_ids))
-        new_points3d = np.array(list(new_points3d))
-    ids_np, points_np = np.hstack((old_ids, new_ids)).astype(np.int64), np.concatenate((old_points3d, new_points3d),
-                                                                                       axis=0)
-    zipped = list(zip(list(ids_np), list(points_np)))
-    ids_list, points_list = zip(*sorted(zipped))
+    new_points3d_with_ids += list(zip(old_ids, old_points3d))
+    ids_list, points_list = zip(*sorted(new_points3d_with_ids))
     return np.array(ids_list).astype(np.int64), np.array(points_list)
 
 
@@ -88,6 +79,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     if known_view_1 is None or known_view_2 is None:
         raise NotImplementedError()
 
+    print('Initialising')
     np.random.seed(42)
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
     intrinsic_mat = to_opencv_camera_mat3x3(
@@ -103,42 +95,56 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     frame2 = known_view_2[0]
     view_mats[frame1] = pose_to_view_mat3x4(known_view_1[1])
     view_mats[frame2] = pose_to_view_mat3x4(known_view_2[1])
+    print(f'Initial frames: {frame1}, {frame2}')
 
     ids, points3d = triangulate(frame1, view_mats, corner_storage, intrinsic_mat,
                                 triangulate_params, np.array([]), np.array([]).reshape(0, 3))
+    print(f'Initial size of point cloud: {len(ids)}\n')
 
+    print('Processing good frames')
+    print('-----------------------------------')
     potential_ids = [frame1 - 1, frame1 + 1, frame2 - 1, frame2 + 1]
-    print('FIRST ITERATION\n')
     while len(potential_ids) != 0:
+        potential_ids = list(set(potential_ids))
         for i, frame_id in enumerate(potential_ids):
             if frame_id < 0 or frame_id >= frame_count or view_mats[frame_id].size != 0:
                 potential_ids[i] = -1
         potential_ids = list(filter(lambda x: x != -1, potential_ids))
         if len(potential_ids) == 0:
             break
+        print('Choosing between frames', end=' ')
+        print(*potential_ids, sep=', ')
         intersec_cnts = []
         for frame_id in potential_ids:
             intersec_cnts.append(get_points(frame_id, corner_storage, ids, points3d)[0].shape[0])
+        print('Intersection counts:', end=' ')
+        print(*intersec_cnts, sep=', ')
         i = np.argmax(intersec_cnts)
         frame_id = potential_ids[i]
         if intersec_cnts[i] == 0:
             break
-        print('Processing frame', frame_id)
+        print(f'Processing frame {frame_id}:')
         ids, points3d, view_mats[frame_id] = get_view(frame_id, corner_storage, intrinsic_mat, ids, points3d)
         if view_mats[frame_id].size == 0:
+            print('    Failed to process')
             potential_ids.pop(i)
             continue
         ids, points3d = triangulate(frame_id, view_mats, corner_storage, intrinsic_mat,
                                     triangulate_params, ids, points3d)
+        print(f'    New size of point cloud: {len(ids)}')
+        print(f'    Processed frame {frame_id}')
         potential_ids.pop(i)
         potential_ids.append(frame_id + 1)
         potential_ids.append(frame_id - 1)
+        print('-----------------------------------')
+    print('All good frames processed\n')
 
-    print('SECOND ITERATION')
-
+    print('Processing all frames')
     for i in range(len(view_mats)):
         print('Processing frame', i)
         _, _, view_mats[i] = get_view(i, corner_storage, intrinsic_mat, ids, points3d)
+
+    print()
 
     point_cloud_builder = PointCloudBuilder(ids, points3d)
 
