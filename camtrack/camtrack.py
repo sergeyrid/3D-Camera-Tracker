@@ -22,7 +22,8 @@ from _camtrack import (
     triangulate_correspondences,
     build_correspondences,
     TriangulationParameters,
-    rodrigues_and_translation_to_view_mat3x4
+    rodrigues_and_translation_to_view_mat3x4,
+    _IDENTITY_POSE_MAT
 )
 
 
@@ -38,11 +39,11 @@ def get_points(i, corner_storage, ids, old_points3d):
 def get_view(i, corner_storage, intrinsic_mat, old_ids, old_points3d):
     ids, points3d, points2d = get_points(i, corner_storage, old_ids, old_points3d)
     if len(points3d) < 4:
-        return np.array([])
+        return old_ids, old_points3d, np.array([])
     retval, r_vec, t_vec, inliers = cv2.solvePnPRansac(points3d, points2d, intrinsic_mat, None,
                                                        flags=cv2.SOLVEPNP_ITERATIVE)
     if not retval:
-        return ids, points3d, np.array([])
+        return old_ids, old_points3d, np.array([])
     good_ids = ids[inliers]
     new_ids, new_points3d = zip(*list(filter(lambda p: p[0] in good_ids or p[0] not in ids,
                                              zip(old_ids, old_points3d))))
@@ -132,15 +133,42 @@ def triangulate(frame1, view_mats, corner_storage, intrinsic_mat, triangulate_pa
     return np.array(ids_list).astype(np.int64), np.array(points_list)
 
 
+def get_initial_views(corner_storage, intrinsic_mat, frame_count, triangulate_params):
+    max_cloud = 0
+    best_frame1 = None
+    best_frame2 = None
+    best_mat2 = None
+    for step in list(range(frame_count // 20 * 10, 0, -5)) + list(range(4, 0, -1)):
+        for frame1 in range(0, frame_count - step, 1):
+            frame2 = frame1 + step
+            corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
+            e, mask = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
+                                           intrinsic_mat, method=cv2.RANSAC)
+            _, r, t, _, ps = cv2.recoverPose(e, corrs.points_1, corrs.points_2, intrinsic_mat, distanceThresh=0.1)
+            mat2 = rodrigues_and_translation_to_view_mat3x4(cv2.Rodrigues(r)[0], t)
+            cloud_size = triangulate_correspondences(corrs,
+                                                     _IDENTITY_POSE_MAT,
+                                                     mat2,
+                                                     intrinsic_mat,
+                                                     triangulate_params)[0].shape[0]
+            if cloud_size > max_cloud and mask.sum() / mask.shape[0] > 0.9:
+                max_cloud = cloud_size
+                best_frame1 = frame1
+                best_frame2 = frame2
+                best_mat2 = mat2
+        if max_cloud > 50:
+            break
+    view1 = best_frame1, view_mat3x4_to_pose(_IDENTITY_POSE_MAT)
+    view2 = best_frame2, view_mat3x4_to_pose(best_mat2)
+    return view1, view2
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
                           known_view_1: Optional[Tuple[int, Pose]] = None,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
-    if known_view_1 is None or known_view_2 is None:
-        raise NotImplementedError()
-
     print('Initialising')
     np.random.seed(42)
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
@@ -151,7 +179,12 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
     frame_count = len(corner_storage)
     view_mats = [np.array([]) for _ in range(frame_count)]
-    triangulate_params = TriangulationParameters(20, 1, 0.5)
+    triangulate_params = TriangulationParameters(1, 0.5, 0.6)
+
+    if known_view_1 is None or known_view_2 is None:
+        print('Choosing best initial frames')
+        known_view_1, known_view_2 = get_initial_views(corner_storage, intrinsic_mat,
+                                                       frame_count, triangulate_params)
 
     frame1 = known_view_1[0]
     frame2 = known_view_2[0]
@@ -193,7 +226,6 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                                     triangulate_params, ids, points3d)
         print(f'    New size of point cloud: {len(ids)}')
         print(f'    Processed frame {frame_id}')
-        points3d = retriangulate(view_mats, corner_storage, intrinsic_mat, ids, points3d)
         potential_ids.pop(i)
         potential_ids.append(frame_id + 1)
         potential_ids.append(frame_id - 1)

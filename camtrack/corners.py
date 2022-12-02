@@ -59,7 +59,7 @@ class Corner:
         return self.quality > other.quality
 
 
-def _track_corners(image_0, image_1, corners_data, levels, quality_level=0.03):
+def _track_corners(image_0, image_1, corners_data, levels, quality_level=0.02):
     if len(corners_data) > 0:
         corner_coords = np.array(list(map(lambda corner: corner.position, corners_data))).reshape(-1, 2)
         min_threshold = float(
@@ -90,7 +90,7 @@ def _track_corners(image_0, image_1, corners_data, levels, quality_level=0.03):
     return deepcopy(corners_data)
 
 
-def _find_corners(image_1, max_id, min_distance, mask, level=0, max_corners=500, quality_level=0.03):
+def _find_corners(image_1, max_id, min_distance, mask, level=0, max_corners=500, quality_level=0.02):
     new_corner_coords, new_corner_qualities = cv2.goodFeaturesToTrackWithQuality(
         image_1, max_corners, quality_level, min_distance, np.uint8(mask))
     new_corners_data = []
