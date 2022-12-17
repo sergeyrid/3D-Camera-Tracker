@@ -138,13 +138,14 @@ def get_initial_views(corner_storage, intrinsic_mat, frame_count, triangulate_pa
     best_frame1 = None
     best_frame2 = None
     best_mat2 = None
-    for step in list(range(frame_count // 20 * 10, 0, -5)) + list(range(4, 0, -1)):
+    max_step = min(frame_count // 20 * 10, 70)
+    for step in list(range(max_step, 0, -5)) + list(range(4, 0, -1)):
         for frame1 in range(0, frame_count - step, 1):
             frame2 = frame1 + step
             corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
             e, mask = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
                                            intrinsic_mat, method=cv2.RANSAC)
-            _, r, t, _, ps = cv2.recoverPose(e, corrs.points_1, corrs.points_2, intrinsic_mat, distanceThresh=0.1)
+            _, r, t, _, ps = cv2.recoverPose(e, corrs.points_1, corrs.points_2, intrinsic_mat, distanceThresh=10)
             mat2 = rodrigues_and_translation_to_view_mat3x4(cv2.Rodrigues(r)[0], t)
             cloud_size = triangulate_correspondences(corrs,
                                                      _IDENTITY_POSE_MAT,
@@ -180,6 +181,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     frame_count = len(corner_storage)
     view_mats = [np.array([]) for _ in range(frame_count)]
     triangulate_params = TriangulationParameters(1, 0.5, 0.6)
+    if 100 < frame_count < 400:
+        triangulate_params = TriangulationParameters(1.5, 0.5, 1)
 
     if known_view_1 is None or known_view_2 is None:
         print('Choosing best initial frames')

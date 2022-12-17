@@ -107,14 +107,20 @@ def _find_corners(image_1, max_id, min_distance, mask, level=0, max_corners=500,
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    pyr_levels = 4
+    np.random.seed(42)
+    pyr_levels = 2
+    track_quality_level = 0.02
+    find_quality_level = 0.02
+    max_corners = 500
+    if 100 < len(frame_sequence) < 400:
+        pyr_levels = 3
     corners_data = []
     image_0 = np.array([[]])
     max_id = 0
     circle_size = max(int(frame_sequence[0].shape[0] / 70), 5)
     for frame, image in tqdm(enumerate(frame_sequence)):
         image_1 = deepcopy(image)
-        corners_data = _track_corners(image_0, image_1, corners_data, pyr_levels)
+        corners_data = _track_corners(image_0, image_1, corners_data, pyr_levels, track_quality_level)
         mask = np.ones_like(image).astype(np.uint8)
         for i in range(pyr_levels):
             min_distance = max(int(image_1.shape[0] / 50), 5)
@@ -122,7 +128,8 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             for coord in corner_coords:
                 mask = cv2.circle(mask, (int(coord[0] / 2**i), int(coord[1] / 2**i)),
                                   min_distance, 0.0, cv2.FILLED)
-            new_corners_data, max_id = _find_corners(image_1, max_id, min_distance, mask, i)
+            new_corners_data, max_id = _find_corners(image_1, max_id, min_distance, mask,
+                                                     i, max_corners, find_quality_level)
             corners_data += new_corners_data
 
             mask = cv2.pyrDown(mask)
