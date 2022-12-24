@@ -186,7 +186,6 @@ def get_initial_views(corner_storage, intrinsic_mat, frame_count, triangulate_pa
             if max_cloud > 50:
                 break
         if max_cloud > 0:
-            print(cos_limit)
             break
     view1 = best_frame1, view_mat3x4_to_pose(eye3x4())
     view2 = best_frame2, view_mat3x4_to_pose(best_mat2)
