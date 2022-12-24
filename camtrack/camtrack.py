@@ -8,6 +8,8 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+from transforms3d.axangles import mat2axangle
+from scipy.spatial.transform import Slerp, Rotation
 
 from corners import CornerStorage
 from data3d import CameraParameters, PointCloud, Pose
@@ -23,8 +25,14 @@ from _camtrack import (
     build_correspondences,
     TriangulationParameters,
     rodrigues_and_translation_to_view_mat3x4,
-    _IDENTITY_POSE_MAT
+    eye3x4
 )
+
+
+def rotation_average(matrix1, matrix2):
+    rot = Rotation.from_matrix([matrix1, matrix2])
+    average_matrix = Slerp([0, 1], rot)(0.5).as_matrix()
+    return average_matrix
 
 
 def get_points(i, corner_storage, ids, old_points3d):
@@ -36,15 +44,31 @@ def get_points(i, corner_storage, ids, old_points3d):
     return np.array(new_ids).astype(np.int64), np.array(points3d), points2d
 
 
-def get_view(i, corner_storage, intrinsic_mat, old_ids, old_points3d):
+def get_view(i, corner_storage, intrinsic_mat, old_ids, old_points3d, view_mats):
     ids, points3d, points2d = get_points(i, corner_storage, old_ids, old_points3d)
-    if len(points3d) < 4:
+    if len(points3d) < 6:
         return old_ids, old_points3d, np.array([])
     retval, r_vec, t_vec, inliers = cv2.solvePnPRansac(points3d, points2d, intrinsic_mat, None,
                                                        flags=cv2.SOLVEPNP_ITERATIVE)
     if not retval:
         return old_ids, old_points3d, np.array([])
     good_ids = ids[inliers]
+    j = 1
+    while True:
+        if i - j >= 0 and view_mats[i - j] is not None and len(view_mats[i - j]) != 0:
+            pose = view_mat3x4_to_pose(view_mats[i - j])
+            r_vec = cv2.Rodrigues(pose.r_mat)[0]
+            t_vec = pose.t_vec.reshape(3, 1)
+            break
+        if i + j < len(view_mats) and view_mats[i + j] is not None and len(view_mats[i + j]) != 0:
+            pose = view_mat3x4_to_pose(view_mats[i + j])
+            r_vec = cv2.Rodrigues(pose.r_mat)[0]
+            t_vec = pose.t_vec.reshape(3, 1)
+            break
+        j += 1
+
+    _, r_vec, t_vec = cv2.solvePnP(points3d[inliers], points2d[inliers], intrinsic_mat, None,
+                                   rvec=r_vec, tvec=t_vec, useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)
     new_ids, new_points3d = zip(*list(filter(lambda p: p[0] in good_ids or p[0] not in ids,
                                              zip(old_ids, old_points3d))))
     return np.array(new_ids).astype(np.int64), np.array(new_points3d), \
@@ -139,27 +163,31 @@ def get_initial_views(corner_storage, intrinsic_mat, frame_count, triangulate_pa
     best_frame2 = None
     best_mat2 = None
     max_step = min(frame_count // 20 * 10, 70)
-    for step in list(range(max_step, 0, -5)) + list(range(4, 0, -1)):
-        for frame1 in range(0, frame_count - step, 1):
-            frame2 = frame1 + step
-            corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
-            e, mask = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
-                                           intrinsic_mat, method=cv2.RANSAC)
-            _, r, t, _, ps = cv2.recoverPose(e, corrs.points_1, corrs.points_2, intrinsic_mat, distanceThresh=10)
-            mat2 = rodrigues_and_translation_to_view_mat3x4(cv2.Rodrigues(r)[0], t)
-            cloud_size = triangulate_correspondences(corrs,
-                                                     _IDENTITY_POSE_MAT,
-                                                     mat2,
-                                                     intrinsic_mat,
-                                                     triangulate_params)[0].shape[0]
-            if cloud_size > max_cloud and mask.sum() / mask.shape[0] > 0.9:
-                max_cloud = cloud_size
-                best_frame1 = frame1
-                best_frame2 = frame2
-                best_mat2 = mat2
-        if max_cloud > 50:
+    for cos_limit in [0.999, 0.9999, 1]:
+        for step in list(range(max_step, 0, -5)) + list(range(4, 0, -1)):
+            for frame1 in range(0, frame_count - step, 1):
+                frame2 = frame1 + step
+                corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
+                e, mask = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
+                                               intrinsic_mat, method=cv2.RANSAC)
+                _, r, t, _, ps = cv2.recoverPose(e, corrs.points_1, corrs.points_2, intrinsic_mat, distanceThresh=10)
+                mat2 = rodrigues_and_translation_to_view_mat3x4(cv2.Rodrigues(r)[0], t)
+                points, _, median_cos = triangulate_correspondences(corrs,
+                                                         eye3x4(),
+                                                         mat2,
+                                                         intrinsic_mat,
+                                                         triangulate_params)
+                cloud_size = len(points)
+                if cloud_size > max_cloud and mask.sum() / mask.shape[0] > 0.9 and median_cos < cos_limit:
+                    max_cloud = cloud_size
+                    best_frame1 = frame1
+                    best_frame2 = frame2
+                    best_mat2 = mat2
+            if max_cloud > 50:
+                break
+        if max_cloud > 0:
             break
-    view1 = best_frame1, view_mat3x4_to_pose(_IDENTITY_POSE_MAT)
+    view1 = best_frame1, view_mat3x4_to_pose(eye3x4())
     view2 = best_frame2, view_mat3x4_to_pose(best_mat2)
     return view1, view2
 
@@ -180,9 +208,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
     frame_count = len(corner_storage)
     view_mats = [np.array([]) for _ in range(frame_count)]
-    triangulate_params = TriangulationParameters(1, 0.5, 0.6)
-    if 100 < frame_count < 400:
-        triangulate_params = TriangulationParameters(1.5, 0.5, 1)
+    triangulate_params = TriangulationParameters(5, 0.5, 0.6)
 
     if known_view_1 is None or known_view_2 is None:
         print('Choosing best initial frames')
@@ -220,7 +246,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         if intersec_cnts[i] == 0:
             break
         print(f'Processing frame {frame_id}:')
-        ids, points3d, view_mats[frame_id] = get_view(frame_id, corner_storage, intrinsic_mat, ids, points3d)
+        ids, points3d, view_mats[frame_id] = get_view(frame_id, corner_storage, intrinsic_mat, ids, points3d, view_mats)
         if view_mats[frame_id].size == 0:
             print('    Failed to process')
             potential_ids.pop(i)
@@ -238,8 +264,94 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     print('Processing all frames')
     for i in range(len(view_mats)):
         print('Processing frame', i)
-        _, _, view_mats[i] = get_view(i, corner_storage, intrinsic_mat, ids, points3d)
+        _, _, view_mats[i] = get_view(i, corner_storage, intrinsic_mat, ids, points3d, view_mats)
     print()
+
+    print('Filling in unprocessed frames')
+    for i in range(len(view_mats)):
+        if view_mats[i] is not None and len(view_mats[i] != 0):
+            continue
+        print('Processing frame', i)
+        good_rots = []
+        good_poss = []
+        if i > 0:
+            pose = view_mat3x4_to_pose(view_mats[i - 1])
+            good_rots.append(pose.r_mat)
+            good_poss.append(pose.t_vec)
+        if i < len(view_mats) - 1 and view_mats[i + 1] is not None and len(view_mats[i + 1]) != 0:
+            pose = view_mat3x4_to_pose(view_mats[i + 1])
+            good_rots.append(pose.r_mat)
+            good_poss.append(pose.t_vec)
+        if len(good_rots) == 0:
+            view_mats[i] = eye3x4()
+            continue
+        if len(good_rots) == 2:
+            rot = rotation_average(*good_rots)
+        else:
+            rot = good_rots[0]
+        pos = np.mean(good_poss, axis=0)
+        view_mats[i] = pose_to_view_mat3x4(Pose(rot, pos))
+    print()
+
+    print(f'Fixing outlying camera rotations')
+    initial_rot = np.eye(3, 3, dtype=np.float32)
+    angles = []
+    rots = []
+    for view_mat in view_mats:
+        rots.append(view_mat3x4_to_pose(view_mat).r_mat)
+    rots = np.array(rots)
+    for rot in rots:
+        angles.append(np.abs(mat2axangle(initial_rot @ rot.T)[1]))
+    median_angle = np.median(angles)
+    inliers = np.abs(np.array(angles) - median_angle) < np.pi / 8
+    for i in range(len(rots)):
+        if inliers[i]:
+            continue
+        print('Processing frame', i)
+        left = i
+        right = i
+        while left > 0 and not inliers[left]:
+            left -= 1
+        while right < len(rots) - 1 and not inliers[right]:
+            right += 1
+        if inliers[left] and inliers[right]:
+            rots[i] = rotation_average(rots[left], rots[right])
+        elif inliers[left]:
+            rots[i] = rots[left]
+        else:
+            rots[i] = rots[right]
+    print()
+
+    for j in range(10):
+        print(f'Smoothing camera rotations (iteration {j})')
+        for i in range(1, len(view_mats) - 1):
+            print('Processing frame', i)
+            pose = view_mat3x4_to_pose(view_mats[i])
+            rot = pose.r_mat
+            left_rot = view_mat3x4_to_pose(view_mats[i - 1]).r_mat
+            right_rot = view_mat3x4_to_pose(view_mats[i + 1]).r_mat
+            left_angle = np.abs(mat2axangle(left_rot @ rot.T)[1])
+            right_angle = np.abs(mat2axangle(right_rot @ rot.T)[1])
+            if left_angle > np.pi / 10 or right_angle > np.pi / 10:
+                print('Calculating average')
+                rot = rotation_average(left_rot, right_rot)
+            view_mats[i] = pose_to_view_mat3x4(Pose(rot, pose.t_vec))
+        print()
+
+    for j in range(10):
+        print(f'Smoothing camera positions (iteration {j})')
+        for i in range(1, len(view_mats) - 1):
+            print('Processing frame', i)
+            pose = view_mat3x4_to_pose(view_mats[i])
+            pos = pose.t_vec
+            left_pos = view_mat3x4_to_pose(view_mats[i - 1]).t_vec
+            right_pos = view_mat3x4_to_pose(view_mats[i + 1]).t_vec
+            left_translation = np.linalg.norm(pos - left_pos)
+            right_translation = np.linalg.norm(pos - right_pos)
+            if left_translation > 0.5 or right_translation > 0.5:
+                pos = np.mean([left_pos, right_pos], axis=0)
+            view_mats[i] = pose_to_view_mat3x4(Pose(pose.r_mat, pos))
+        print()
 
     point_cloud_builder = PointCloudBuilder(ids, points3d)
 
