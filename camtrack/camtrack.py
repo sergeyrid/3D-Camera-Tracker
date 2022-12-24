@@ -186,10 +186,77 @@ def get_initial_views(corner_storage, intrinsic_mat, frame_count, triangulate_pa
             if max_cloud > 50:
                 break
         if max_cloud > 0:
+            print(cos_limit)
             break
     view1 = best_frame1, view_mat3x4_to_pose(eye3x4())
     view2 = best_frame2, view_mat3x4_to_pose(best_mat2)
     return view1, view2
+
+
+def smooth_path(view_mats):
+    print(f'Fixing outlying camera rotations')
+    initial_rot = np.eye(3, 3, dtype=np.float32)
+    angles = []
+    rots = []
+    for view_mat in view_mats:
+        rots.append(view_mat3x4_to_pose(view_mat).r_mat)
+    rots = np.array(rots)
+    for rot in rots:
+        angles.append(np.abs(mat2axangle(initial_rot @ rot.T)[1]))
+    median_angle = np.median(angles)
+    inliers = np.abs(np.array(angles) - median_angle) < np.pi / 8
+    for i in range(len(rots)):
+        if inliers[i]:
+            continue
+        print('Processing frame', i)
+        left = i
+        right = i
+        while left > 0 and not inliers[left]:
+            left -= 1
+        while right < len(rots) - 1 and not inliers[right]:
+            right += 1
+        if inliers[left] and inliers[right]:
+            rots[i] = rotation_average(rots[left], rots[right])
+        elif inliers[left]:
+            rots[i] = rots[left]
+        else:
+            rots[i] = rots[right]
+    for i in range(len(view_mats)):
+        pose = view_mat3x4_to_pose(view_mats[i])
+        view_mats[i] = pose_to_view_mat3x4(Pose(rots[i], pose.t_vec))
+    print()
+
+    for j in range(10):
+        print(f'Smoothing camera rotations (iteration {j})')
+        for i in range(1, len(view_mats) - 1):
+            print('Processing frame', i)
+            pose = view_mat3x4_to_pose(view_mats[i])
+            rot = pose.r_mat
+            left_rot = view_mat3x4_to_pose(view_mats[i - 1]).r_mat
+            right_rot = view_mat3x4_to_pose(view_mats[i + 1]).r_mat
+            left_angle = np.abs(mat2axangle(left_rot @ rot.T)[1])
+            right_angle = np.abs(mat2axangle(right_rot @ rot.T)[1])
+            if left_angle > np.pi / 10 or right_angle > np.pi / 10:
+                print('Calculating average')
+                rot = rotation_average(left_rot, right_rot)
+            view_mats[i] = pose_to_view_mat3x4(Pose(rot, pose.t_vec))
+        print()
+
+    for j in range(10):
+        print(f'Smoothing camera positions (iteration {j})')
+        for i in range(1, len(view_mats) - 1):
+            print('Processing frame', i)
+            pose = view_mat3x4_to_pose(view_mats[i])
+            pos = pose.t_vec
+            left_pos = view_mat3x4_to_pose(view_mats[i - 1]).t_vec
+            right_pos = view_mat3x4_to_pose(view_mats[i + 1]).t_vec
+            left_translation = np.linalg.norm(pos - left_pos)
+            right_translation = np.linalg.norm(pos - right_pos)
+            if left_translation > 0.5 or right_translation > 0.5:
+                pos = np.mean([left_pos, right_pos], axis=0)
+            view_mats[i] = pose_to_view_mat3x4(Pose(pose.r_mat, pos))
+        print()
+        return view_mats
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
@@ -293,65 +360,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         view_mats[i] = pose_to_view_mat3x4(Pose(rot, pos))
     print()
 
-    print(f'Fixing outlying camera rotations')
-    initial_rot = np.eye(3, 3, dtype=np.float32)
-    angles = []
-    rots = []
-    for view_mat in view_mats:
-        rots.append(view_mat3x4_to_pose(view_mat).r_mat)
-    rots = np.array(rots)
-    for rot in rots:
-        angles.append(np.abs(mat2axangle(initial_rot @ rot.T)[1]))
-    median_angle = np.median(angles)
-    inliers = np.abs(np.array(angles) - median_angle) < np.pi / 8
-    for i in range(len(rots)):
-        if inliers[i]:
-            continue
-        print('Processing frame', i)
-        left = i
-        right = i
-        while left > 0 and not inliers[left]:
-            left -= 1
-        while right < len(rots) - 1 and not inliers[right]:
-            right += 1
-        if inliers[left] and inliers[right]:
-            rots[i] = rotation_average(rots[left], rots[right])
-        elif inliers[left]:
-            rots[i] = rots[left]
-        else:
-            rots[i] = rots[right]
-    print()
-
-    for j in range(10):
-        print(f'Smoothing camera rotations (iteration {j})')
-        for i in range(1, len(view_mats) - 1):
-            print('Processing frame', i)
-            pose = view_mat3x4_to_pose(view_mats[i])
-            rot = pose.r_mat
-            left_rot = view_mat3x4_to_pose(view_mats[i - 1]).r_mat
-            right_rot = view_mat3x4_to_pose(view_mats[i + 1]).r_mat
-            left_angle = np.abs(mat2axangle(left_rot @ rot.T)[1])
-            right_angle = np.abs(mat2axangle(right_rot @ rot.T)[1])
-            if left_angle > np.pi / 10 or right_angle > np.pi / 10:
-                print('Calculating average')
-                rot = rotation_average(left_rot, right_rot)
-            view_mats[i] = pose_to_view_mat3x4(Pose(rot, pose.t_vec))
-        print()
-
-    for j in range(10):
-        print(f'Smoothing camera positions (iteration {j})')
-        for i in range(1, len(view_mats) - 1):
-            print('Processing frame', i)
-            pose = view_mat3x4_to_pose(view_mats[i])
-            pos = pose.t_vec
-            left_pos = view_mat3x4_to_pose(view_mats[i - 1]).t_vec
-            right_pos = view_mat3x4_to_pose(view_mats[i + 1]).t_vec
-            left_translation = np.linalg.norm(pos - left_pos)
-            right_translation = np.linalg.norm(pos - right_pos)
-            if left_translation > 0.5 or right_translation > 0.5:
-                pos = np.mean([left_pos, right_pos], axis=0)
-            view_mats[i] = pose_to_view_mat3x4(Pose(pose.r_mat, pos))
-        print()
+    view_mats = smooth_path(view_mats)
 
     point_cloud_builder = PointCloudBuilder(ids, points3d)
 
