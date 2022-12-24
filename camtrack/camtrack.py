@@ -275,6 +275,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     frame_count = len(corner_storage)
     view_mats = [np.array([]) for _ in range(frame_count)]
     triangulate_params = TriangulationParameters(5, 0.5, 0.6)
+    if 100 < frame_count < 400:
+        triangulate_params = TriangulationParameters(1.5, 0.5, 0.6)
 
     if known_view_1 is None or known_view_2 is None:
         print('Choosing best initial frames')

@@ -112,6 +112,8 @@ def _build_impl(frame_sequence: pims.FramesSequence,
     track_quality_level = 0.02
     find_quality_level = 0.02
     max_corners = 1000
+    if 100 < len(frame_sequence) < 400:
+        pyr_levels = 3
     corners_data = []
     image_0 = np.array([[]])
     max_id = 0
